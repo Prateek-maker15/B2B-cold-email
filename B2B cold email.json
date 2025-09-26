@@ -1,0 +1,829 @@
+{
+  "name": "B2B cold email",
+  "nodes": [
+    {
+      "parameters": {
+        "formTitle": "Company details",
+        "formFields": {
+          "values": [
+            {
+              "fieldLabel": "Name"
+            },
+            {
+              "fieldLabel": "Service"
+            },
+            {
+              "fieldLabel": "Projects"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.formTrigger",
+      "typeVersion": 2.3,
+      "position": [
+        -464,
+        -384
+      ],
+      "id": "0cedc702-0801-4e8c-8ff9-0ce9abfe513a",
+      "name": "On form submission",
+      "webhookId": "2052678a-39a9-4450-9365-d5525b521d59"
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=You are an expert market research analyst. Your task is to identify Indian SMEs and startups that have recently received funding. For each company, analyze whether their industry, business model, or growth stage could benefit from my services. These are my services {{ $json.Service }} and the projects I have done{{ $json.Projects }}.\n**Output requirements (strict):**\n- Output only a single JSON array. No extra commentary or text.\n- Each element must be a JSON object with exactly these keys:\n  - `company_name` (string) — official name.\n  - `industry` (string) — short industry classification.\n  - `business_model` (string) — e.g., B2B SaaS, marketplace, D2C, fintech platform, enterprise services, etc.\n  - `recent_funding` (string) — concise: \"<Round> — <Amount> <Currency> — <YYYY-MM-DD or approx YYYY-MM>\". Example: \"Series A — 5,000,000 USD — 2025-04-10\".\n  - `how_my_service_can_benefit_them` (string) — 1–2 short sentences describing concrete value I can deliver given my skills in business development, product management, and AI automation.\n\n**Formatting rules:**\n- Keep every value as plain text (no HTML).\n- Dates should use ISO-like format (YYYY-MM-DD). If only month/year known, use \"YYYY-MM (approx)\".\n- Amounts should include currency abbreviation (USD/INR/etc).\n- Provide exactly 10 objects (if fewer than 10 qualified companies exist, return as many as you can).\n- Prioritize companies where fit is strong; use your internal RICE ranking to choose them.\n- Include source URLs only if asked later — do not include URLs in this output.\n\nBegin now and output only the JSON array.",
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 2.2,
+      "position": [
+        64,
+        -384
+      ],
+      "id": "06becd6f-65b4-4b15-872f-9ffe32323666",
+      "name": "AI Agent"
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatGoogleGemini",
+      "typeVersion": 1,
+      "position": [
+        64,
+        -176
+      ],
+      "id": "e0c9e51b-83b6-4aac-b5c4-ca71765bcb1d",
+      "name": "Google Gemini Chat Model3",
+      "credentials": {
+        "googlePalmApi": {
+          "id": "sY9n4u6AeaP9xgAF",
+          "name": "Google Gemini(PaLM) Api account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "sessionIdType": "customKey",
+        "sessionKey": "={{ $('On form submission').item.json.Service }}{{ $('On form submission').item.json.Projects }}"
+      },
+      "type": "@n8n/n8n-nodes-langchain.memoryBufferWindow",
+      "typeVersion": 1.3,
+      "position": [
+        160,
+        -128
+      ],
+      "id": "9d117c7b-fbeb-4c2d-9849-b7047d727074",
+      "name": "Simple Memory1"
+    },
+    {
+      "parameters": {
+        "jsCode": "// items come from the previous LLM node\n// This function will:\n// 1. find the string that contains the JSON array (handles output being a plain string or wrapped)\n// 2. strip code fences ```json ... ``` if present\n// 3. parse the JSON and return mapped items for Google Sheets\n\nconst out = [];\n\n// iterate all incoming items just in case\nfor (const item of items) {\n  // try several possible places for the payload\n  let payload = item.json.output ?? item.json.text ?? item.json.result ?? null;\n\n  // if none of the common fields exist, maybe the whole json is already the string/array\n  if (!payload) {\n    // if item.json already is an object/array, use it directly\n    if (typeof item.json === 'string') payload = item.json;\n    else {\n      // if it's already a parsed array of objects, push them through\n      if (Array.isArray(item.json)) {\n        for (const o of item.json) out.push({ json: o });\n        continue;\n      }\n      // try to find the first key that looks like a JSON string\n      const keys = Object.keys(item.json);\n      for (const k of keys) {\n        if (typeof item.json[k] === 'string' && item.json[k].trim().startsWith('[')) {\n          payload = item.json[k];\n          break;\n        }\n      }\n      if (!payload) {\n        // fallback: try stringify and parse\n        try {\n          const j = item.json;\n          if (Array.isArray(j)) {\n            for (const o of j) out.push({ json: o });\n            continue;\n          }\n        } catch (e) {}\n        continue;\n      }\n    }\n  }\n\n  // payload now should be a string containing the JSON array\n  if (typeof payload !== 'string') payload = String(payload);\n\n  // remove markdown code fences like ```json and ```\n  payload = payload.replace(/```json/g, '').replace(/```/g, '').trim();\n\n  // some LLM outputs add surrounding backticks or triple quotes - remove them\n  payload = payload.replace(/^[\"'`]+/, '').replace(/[\"'`]+$/, '').trim();\n\n  // now unescape common escaped quotes if they exist\n  // If the string itself contains escaped quotes (\\\"), JSON.parse will still work,\n  // so we should not aggressively unescape. We'll try parse directly.\n  try {\n    const parsed = JSON.parse(payload);\n    if (Array.isArray(parsed)) {\n      for (const o of parsed) out.push({ json: o });\n      continue;\n    } else if (typeof parsed === 'object' && parsed !== null) {\n      out.push({ json: parsed });\n      continue;\n    }\n  } catch (err) {\n    // attempt a second approach: the payload may itself be a quoted JSON string\n    try {\n      const payload2 = payload.replace(/\\\\\"/g, '\"');\n      const parsed2 = JSON.parse(payload2);\n      if (Array.isArray(parsed2)) {\n        for (const o of parsed2) out.push({ json: o });\n        continue;\n      } else if (typeof parsed2 === 'object' && parsed2 !== null) {\n        out.push({ json: parsed2 });\n        continue;\n      }\n    } catch (err2) {\n      // give up on this item silently\n      continue;\n    }\n  }\n}\n\n// return the cleaned items for the next node (Google Sheets)\nreturn out.length ? out : items;\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        400,
+        -384
+      ],
+      "id": "e51ee5f9-ae24-41f2-a0eb-7d1330a7d44b",
+      "name": "Code in JavaScript"
+    },
+    {
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": {
+          "__rl": true,
+          "value": "1qWJD0TzboVWBGEs_gNBX57JMP2mg2XEMpyAYl9R7QZE",
+          "mode": "list",
+          "cachedResultName": "Lead generator",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1qWJD0TzboVWBGEs_gNBX57JMP2mg2XEMpyAYl9R7QZE/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "gid=0",
+          "mode": "list",
+          "cachedResultName": "Sheet1",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1qWJD0TzboVWBGEs_gNBX57JMP2mg2XEMpyAYl9R7QZE/edit#gid=0"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Company name": "={{ $json.company_name }}",
+            "Industry": "={{ $json.industry }}",
+            "Business model": "={{ $json.business_model }}",
+            "Recent funding": "={{ $json.recent_funding }}",
+            "How my service can benefit them": "={{ $json.how_my_service_can_benefit_them }}",
+            "Email": "abcd@gmail.com"
+          },
+          "matchingColumns": [
+            "Company name"
+          ],
+          "schema": [
+            {
+              "id": "Company name",
+              "displayName": "Company name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Industry",
+              "displayName": "Industry",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Business model",
+              "displayName": "Business model",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Recent funding",
+              "displayName": "Recent funding",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "How my service can benefit them",
+              "displayName": "How my service can benefit them",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Email",
+              "displayName": "Email",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        656,
+        -384
+      ],
+      "id": "c05285f0-5939-4dfb-9d88-31fe9b2bed71",
+      "name": "Append or update row in sheet",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "X1qlLNGD2wEhm4fT",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -304,
+        -96
+      ],
+      "id": "6b856380-ee99-4bee-93c6-c396f95bc073",
+      "name": "When clicking ‘Execute workflow’"
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=Write a personalized cold email pitch using a professional and confident tone.Bridge their achievement to the services my company provides, which helps companies streamline expansion efforts with 40% faster compliance workflows. Introduce our project for [Project 1 Client Name], explaining we streamlined their global expansion and achieved 40% faster compliance workflows. Mention our project with [Project 2 Client Name] resulted in [Quantifiable Result]. Propose a low-friction CTA, suggesting a brief 15-minute call to explore how we could support their plans. Ensure the email is concise, under 200 words. Output two value pairs \"subject\" and \"body\"{{ $json['Company name'] }}{{ $json.Industry }}{{ $json['Business model'] }}{{ $json['Recent funding'] }}{{ $json['How my service can benefit them'] }}",
+        "batching": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.7,
+      "position": [
+        880,
+        -384
+      ],
+      "id": "3cfd0bc2-31f3-472a-acfb-8d5f28459dfa",
+      "name": "Basic LLM Chain1",
+      "retryOnFail": false
+    },
+    {
+      "parameters": {
+        "jsCode": "// n8n Function node / Node.js\n// items: incoming items from previous node (each item.json.text or item.json.output may contain the raw string)\nconst out = [];\n\nfor (const item of items) {\n  let raw = item.json.output ?? item.json.text ?? item.json.body ?? JSON.stringify(item.json);\n\n  // cleanup common wrappers\n  raw = raw.replace(/```(?:json)?/g, '').trim();\n  raw = raw.replace(/^[\"'`]+|[\"'`]+$/g, '').trim();\n\n  let subject = '';\n  let body = '';\n\n  // Try JSON.parse first (handles valid JSON strings with escaped newlines)\n  try {\n    const parsed = JSON.parse(raw);\n    subject = parsed.subject ?? '';\n    body = parsed.body ?? '';\n  } catch (e) {\n    // Fallback: regex-based extraction (handles multi-line content)\n    // Match \"subject\": \"....\", \"body\": \"....\"\n    const subjMatch = raw.match(/\"subject\"\\s*:\\s*\"([\\s\\S]*?)\"(?:\\s*,\\s*\"(?:body|Body)\"|,)/i);\n    const bodyMatch = raw.match(/\"body\"\\s*:\\s*\"([\\s\\S]*?)\"\\s*\\}/i);\n\n    if (subjMatch) subject = subjMatch[1].replace(/\\\\\"/g, '\"').replace(/\\\\n/g, '\\n').trim();\n    if (bodyMatch) body = bodyMatch[1].replace(/\\\\\"/g, '\"').replace(/\\\\n/g, '\\n').trim();\n\n    // Another simple pattern: Subject: ... newline Body: ...\n    if (!subject) {\n      const alt = raw.match(/subject\\s*[:=]\\s*(.+)/i);\n      if (alt) subject = alt[1].split('\\n')[0].trim();\n    }\n  }\n\n  out.push({\n    json: {\n      subject,\n      body\n    }\n  });\n}\n\nreturn out;\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1184,
+        -384
+      ],
+      "id": "a9e0bb27-8067-4c08-99bc-ec8e6ab581b4",
+      "name": "Code in JavaScript1"
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatGoogleGemini",
+      "typeVersion": 1,
+      "position": [
+        880,
+        -208
+      ],
+      "id": "9d9fa642-5e9e-4ec4-af08-a2c6faf2d2c0",
+      "name": "Google Gemini Chat Model",
+      "credentials": {
+        "googlePalmApi": {
+          "id": "sY9n4u6AeaP9xgAF",
+          "name": "Google Gemini(PaLM) Api account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "sendTo": "=",
+        "subject": "={{ $json.subject }}",
+        "message": "={{ $json.body }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        1408,
+        -384
+      ],
+      "id": "b358473f-126c-413e-a4ce-e57d3afe16e8",
+      "name": "Send a message",
+      "webhookId": "67d6e494-297f-4f47-b7ef-b0fc65e0217b",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "0LcONvj7jRTHyQwE",
+          "name": "Gmail account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": {
+          "__rl": true,
+          "value": "1_MCkeTGFwKhsuxsVHTfOxWLwJ2Q6g4gTXGErcdeEOfk",
+          "mode": "list",
+          "cachedResultName": "Company info",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1_MCkeTGFwKhsuxsVHTfOxWLwJ2Q6g4gTXGErcdeEOfk/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": 268724182,
+          "mode": "list",
+          "cachedResultName": "Company Details",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1_MCkeTGFwKhsuxsVHTfOxWLwJ2Q6g4gTXGErcdeEOfk/edit#gid=268724182"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [
+            "Name"
+          ],
+          "schema": [
+            {
+              "id": "Name",
+              "displayName": "Name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Service",
+              "displayName": "Service",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Projects",
+              "displayName": "Projects",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "submittedAt",
+              "displayName": "submittedAt",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "formMode",
+              "displayName": "formMode",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        -256,
+        -384
+      ],
+      "id": "aaf4ce59-fe80-4799-aef6-3b55dbb22194",
+      "name": "Append or update row in sheet1",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "X1qlLNGD2wEhm4fT",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "domain",
+              "name": "domain",
+              "value": "microsoft.com",
+              "type": "string"
+            },
+            {
+              "id": "company_name",
+              "name": "company_name",
+              "value": "",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "43df5adf-648b-4825-acc2-d9bbf0509e3e",
+      "name": "Enter Request Parameters",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        704,
+        80
+      ],
+      "notes": "Request parameters reference: https://anymailfinder.com/email-finder-api/docs/find-company-email#request-parameters"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.anymailfinder.com/v5.1/find-email/company",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "domain",
+              "value": "={{ $json.domain }}"
+            },
+            {
+              "name": "company_name",
+              "value": "={{ $json.company_name }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 180000
+        }
+      },
+      "id": "e9198286-8b1c-45a3-8a7e-302a064e15f2",
+      "name": "Call Anymailfinder API",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        928,
+        80
+      ],
+      "onError": "continueErrorOutput",
+      "notes": "This node sends the request to Anymailfinder.\nMake sure you've connected your API key in the credentials (HTTP Header Auth)."
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "name": "Email found",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3,
+      "position": [
+        1600,
+        -128
+      ],
+      "id": "f4ebaebf-ce6a-44e0-91ee-366963807b07",
+      "notes": "This node prepares the valid email and status for use in next steps (e.g., storage, notification)."
+    },
+    {
+      "parameters": {},
+      "name": "Email not found",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        1616,
+        48
+      ],
+      "id": "0815b8bb-f3ba-43e7-9694-0053cc0166a3",
+      "notes": "This handles cases where the email wasn't found or status was not valid (e.g., risky, blacklisted, not_found)."
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        1488,
+        160
+      ],
+      "id": "6f4d7e8d-f348-4f0a-a464-9e40b391c88e",
+      "name": "Bad input error"
+    },
+    {
+      "parameters": {
+        "jsCode": "if ($input.first().json.error.status === 401) {\n  throw new Error(\"Anymail API key missing or invalid!\");\n}\nif ($input.first().json.error.status === 402) {\n  throw new Error(\"Anymail out of credits!\");\n}\nthrow new Error(\"Anymail unknown error!\");\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1504,
+        336
+      ],
+      "id": "1e96794a-4433-4d9c-8861-bb57e6c06eeb",
+      "name": "Handle error"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "9c84b35b-6021-46d2-bef7-93f6f09383d8",
+              "leftValue": "={{ $json.error.status }}",
+              "rightValue": 400,
+              "operator": {
+                "type": "number",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1216,
+        128
+      ],
+      "id": "2445db73-7a17-4fbb-a74d-e3b613b33165",
+      "name": "Check error type"
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.email_status }}",
+                    "rightValue": "valid",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "id": "e2d035e7-353e-4c3e-a82a-5ab3ad5de400"
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "valid"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "7440ef17-b184-49f9-bc92-0ec289e11ccf",
+                    "leftValue": "={{ $json.email_status }}",
+                    "rightValue": "risky",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "risky"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "7eec38fb-005c-4ea7-9b7b-2e39e0ac4156",
+                    "leftValue": "",
+                    "rightValue": "",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "not found"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        1328,
+        -96
+      ],
+      "id": "e96b9e0f-1078-44b5-a71f-057477b49f81",
+      "name": "Switch"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "On form submission": {
+      "main": [
+        [
+          {
+            "node": "Append or update row in sheet1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Google Gemini Chat Model3": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Simple Memory1": {
+      "ai_memory": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_memory",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Agent": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript": {
+      "main": [
+        [
+          {
+            "node": "Append or update row in sheet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "When clicking ‘Execute workflow’": {
+      "main": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Append or update row in sheet": {
+      "main": [
+        [
+          {
+            "node": "Basic LLM Chain1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Basic LLM Chain1": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript1": {
+      "main": [
+        [
+          {
+            "node": "Send a message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Google Gemini Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Basic LLM Chain1",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Append or update row in sheet1": {
+      "main": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call Anymailfinder API": {
+      "main": [
+        [
+          {
+            "node": "Switch",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Check error type",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check error type": {
+      "main": [
+        [
+          {
+            "node": "Bad input error",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Handle error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Switch": {
+      "main": [
+        [
+          {
+            "node": "Email found",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Email not found",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Email not found",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Enter Request Parameters": {
+      "main": [
+        [
+          {
+            "node": "Call Anymailfinder API",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Email found": {
+      "main": [
+        []
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "7b5bccd3-2704-437c-b2e7-178e13da3fd0",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "ac4d18253e5d515611ac1c1be364fdd426d7e6fa0280d83013286617b54709b1"
+  },
+  "id": "5eBAx3Mibqq5HyKN",
+  "tags": []
+}
